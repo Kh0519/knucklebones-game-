@@ -2,184 +2,140 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="UTF-8" />
-  <title>距骨骰：雙人本地版</title>
+  <title>Knucklebones 線上對戰</title>
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
   <style>
-    body { font-family: sans-serif; text-align: center; background: #f0f0f0; }
-    h1 { margin-top: 20px; }
-    .board { display: flex; justify-content: center; gap: 60px; margin-top: 20px; }
-    .column {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      padding: 10px;
-      border-radius: 10px;
-      transition: background-color 0.3s ease;
-      background-color: #fff;
-    }
-    .highlight { background-color: #ffeeba !important; }
-    .row { display: flex; justify-content: center; gap: 10px; }
-    .cell {
-      width: 50px; height: 50px; font-size: 20px;
-      display: flex; align-items: center; justify-content: center;
-      background: white; border: 2px solid #ccc; border-radius: 8px;
-    }
-    .matched { background-color: #cce5ff; border-color: #004085; }
-    .info, .score { margin-top: 10px; font-size: 18px; }
-    button { margin: 10px; padding: 10px 20px; font-size: 16px; }
-    .player-title { font-weight: bold; font-size: 16px; margin-bottom: 5px; }
+    body { font-family: Arial, sans-serif; text-align: center; }
+    .hidden { display: none; }
+    .board { display: grid; gap: 5px; justify-content: center; margin: 10px auto; }
+    .cell { width: 40px; height: 40px; font-size: 24px; line-height: 40px; border: 1px solid #ccc; background-color: white; }
+    .score { margin-top: 5px; }
   </style>
 </head>
 <body>
-  <h1>🎲 距骨骰：雙人對戰</h1>
-  <div class="board">
-    <div class="column" id="player1Column">
-      <div class="player-title">玩家 1</div>
-      <div class="row" id="p1Row0" onclick="handleClick(0)"></div>
-      <div class="row" id="p1Row1" onclick="handleClick(1)"></div>
-      <div class="row" id="p1Row2" onclick="handleClick(2)"></div>
-      <div class="score" id="p1ScoreDisplay">分數：0</div>
-    </div>
-    <div class="column" id="player2Column">
-      <div class="player-title">玩家 2</div>
-      <div class="row" id="p2Row0" onclick="handleClick(0, true)"></div>
-      <div class="row" id="p2Row1" onclick="handleClick(1, true)"></div>
-      <div class="row" id="p2Row2" onclick="handleClick(2, true)"></div>
-      <div class="score" id="p2ScoreDisplay">分數：0</div>
-    </div>
+
+  <div id="room-selection">
+    <h2>輸入房間代碼</h2>
+    <input id="room-input" placeholder="例如：abc123" />
+    <button onclick="joinRoom()">加入房間</button>
   </div>
-  <button onclick="rollDice()" id="rollBtn">擲骰</button>
-  <button onclick="resetGame()">重置遊戲</button>
-  <div class="info" id="info"></div>
-  <div class="info" id="status"></div>
+
+  <div id="game" class="hidden">
+    <h2>Knucklebones 對戰中</h2>
+    <div id="status"></div>
+    <button onclick="rollDice()">擲骰</button>
+
+    <h3>你的棋盤</h3>
+    <div id="myBoard" class="board"></div>
+    <div id="myScore" class="score">分數: 0</div>
+
+    <h3>對手的棋盤</h3>
+    <div id="opponentBoard" class="board"></div>
+    <div id="opponentScore" class="score">分數: 0</div>
+  </div>
 
   <script>
-    const maxPerRow = 3;
-    let p1Board, p2Board, currentPlayer, currentDie, gameOver;
+    const socket = io("http://localhost:3000");
+    let playerNumber = 0;
+    let roomId = '';
+    let boardSize = 3, maxDice = 6;
+    let myBoard, opponentBoard;
+    let currentDice = null;
+    let myTurn = false;
 
-    function initializeGame() {
-      p1Board = [[], [], []];
-      p2Board = [[], [], []];
-      currentPlayer = 1;
-      currentDie = null;
-      gameOver = false;
-      document.getElementById("rollBtn").disabled = false;
-      document.getElementById("status").innerHTML = "";
-      updatePlayerHighlight();
-      renderBoard();
-      updateScores();
-      document.getElementById("info").textContent = "請按下『擲骰』開始遊戲";
+    function joinRoom() {
+      roomId = document.getElementById("room-input").value.trim();
+      if (!roomId) return alert("請輸入房間代碼");
+
+      socket.emit('join', roomId);
     }
 
-    function renderBoard() {
-      for (let i = 0; i < 3; i++) {
-        renderRow(`p1Row${i}`, p1Board[i]);
-        renderRow(`p2Row${i}`, p2Board[i]);
-      }
+    socket.on('joined', ({ player }) => {
+      playerNumber = player;
+      document.getElementById("room-selection").classList.add("hidden");
+      document.getElementById("game").classList.remove("hidden");
+      initBoards();
+      updateStatus("等待另一位玩家加入...");
+    });
+
+    socket.on('playerJoined', () => {
+      if (playerNumber === 1) myTurn = true;
+      updateStatus("雙方已連線，遊戲開始！");
+    });
+
+    socket.on('action', handleOpponentAction);
+
+    function initBoards() {
+      myBoard = Array(boardSize).fill(null).map(() => Array(boardSize).fill(null));
+      opponentBoard = Array(boardSize).fill(null).map(() => Array(boardSize).fill(null));
+      renderBoards();
     }
 
-    function renderRow(rowId, rowData) {
-      const row = document.getElementById(rowId);
-      row.innerHTML = "";
-      const counts = {};
-      rowData.forEach(d => counts[d] = (counts[d] || 0) + 1);
+    function renderBoards() {
+      renderBoard("myBoard", myBoard, true);
+      renderBoard("opponentBoard", opponentBoard, false);
+    }
 
-      for (let j = 0; j < maxPerRow; j++) {
-        const cell = document.createElement("div");
-        cell.className = "cell";
-        const die = rowData[j];
-        if (die !== undefined) {
-          cell.textContent = die;
-          if (counts[die] >= 2) {
-            cell.classList.add("matched");
+    function renderBoard(id, board, isMyBoard) {
+      const el = document.getElementById(id);
+      el.innerHTML = "";
+      el.style.gridTemplateColumns = `repeat(${boardSize}, 40px)`;
+      board.forEach((row, r) => {
+        row.forEach((cell, c) => {
+          const div = document.createElement("div");
+          div.className = "cell";
+          div.textContent = cell !== null ? cell : "";
+          if (isMyBoard && myTurn) {
+            div.onclick = () => placeDice(r, c);
           }
-        }
-        row.appendChild(cell);
-      }
+          el.appendChild(div);
+        });
+      });
     }
 
     function rollDice() {
-      if (gameOver) return;
-      currentDie = Math.floor(Math.random() * 6) + 1;
-      document.getElementById("info").textContent = `玩家 ${currentPlayer} 擲出了：${currentDie}，請點擊自己的任一行。`;
+      if (!myTurn || currentDice !== null) return;
+      currentDice = Math.floor(Math.random() * maxDice) + 1;
+      updateStatus(`你擲出了：${currentDice}`);
     }
 
-    function handleClick(rowIndex, isP2Click = false) {
-      if (gameOver || currentDie === null) return;
-      if ((currentPlayer === 1 && isP2Click) || (currentPlayer === 2 && !isP2Click)) return;
+    function placeDice(r, c) {
+      if (!myTurn || currentDice === null || myBoard[r][c] !== null) return;
 
-      const board = currentPlayer === 1 ? p1Board : p2Board;
-      const opponent = currentPlayer === 1 ? p2Board : p1Board;
+      myBoard[r][c] = currentDice;
+      renderBoards();
+      updateScore();
 
-      if (board[rowIndex].length >= maxPerRow) {
-        alert("該行已滿！");
-        return;
+      // 傳送動作
+      socket.emit('action', { type: 'place', row: r, col: c, value: currentDice });
+
+      currentDice = null;
+      myTurn = false;
+      updateStatus("等待對手回合...");
+    }
+
+    function handleOpponentAction(data) {
+      if (data.type === 'place') {
+        opponentBoard[data.row][data.col] = data.value;
+        renderBoards();
+        updateScore();
+        myTurn = true;
+        updateStatus("輪到你囉！");
       }
-
-      // 清除對面相同行上相同點數
-      opponent[rowIndex] = opponent[rowIndex].filter(d => d !== currentDie);
-      board[rowIndex].push(currentDie);
-
-      currentDie = null;
-      renderBoard();
-      updateScores();
-
-      if (checkGameEnd()) return;
-
-      currentPlayer = currentPlayer === 1 ? 2 : 1;
-      updatePlayerHighlight();
-      document.getElementById("info").textContent = `輪到玩家 ${currentPlayer} 擲骰。`;
     }
 
-    function calcScore(board) {
-      let score = 0;
-      for (let row of board) {
-        const counts = {};
-        row.forEach(d => counts[d] = (counts[d] || 0) + 1);
-        for (let d in counts) {
-          score += d * counts[d] * counts[d];
-        }
-      }
-      return score;
+    function updateScore() {
+      document.getElementById("myScore").textContent = "分數: " + getScore(myBoard);
+      document.getElementById("opponentScore").textContent = "分數: " + getScore(opponentBoard);
     }
 
-    function updateScores() {
-      const p1Score = calcScore(p1Board);
-      const p2Score = calcScore(p2Board);
-      document.getElementById("p1ScoreDisplay").textContent = `分數：${p1Score}`;
-      document.getElementById("p2ScoreDisplay").textContent = `分數：${p2Score}`;
+    function getScore(board) {
+      return board.flat().reduce((sum, cell) => sum + (cell ?? 0), 0);
     }
 
-    function checkGameEnd() {
-      if (p1Board.flat().length >= 9 && p2Board.flat().length >= 9) {
-        const p1Score = calcScore(p1Board);
-        const p2Score = calcScore(p2Board);
-        const status = document.getElementById("status");
-        status.innerHTML = `<h2>遊戲結束！</h2>
-          <p>玩家 1 分數：${p1Score}</p>
-          <p>玩家 2 分數：${p2Score}</p>
-          <h3>${p1Score > p2Score ? "🎉 玩家 1 勝利！" : p2Score > p1Score ? "🎉 玩家 2 勝利！" : "🤝 平手！"}</h3>`;
-        document.getElementById("rollBtn").disabled = true;
-        gameOver = true;
-        return true;
-      }
-      return false;
+    function updateStatus(msg) {
+      document.getElementById("status").textContent = msg;
     }
-
-    function resetGame() {
-      initializeGame();
-    }
-
-    function updatePlayerHighlight() {
-      const p1Col = document.getElementById("player1Column");
-      const p2Col = document.getElementById("player2Column");
-      p1Col.classList.remove("highlight");
-      p2Col.classList.remove("highlight");
-      if (currentPlayer === 1) p1Col.classList.add("highlight");
-      else p2Col.classList.add("highlight");
-    }
-
-    // 初始化
-    initializeGame();
   </script>
 </body>
 </html>
